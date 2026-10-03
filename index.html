@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>视频混剪 - 网页版</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="logo">🎬 视频混剪</div>
+  <div class="subtitle">选段 → 排序 → 预览 → 导出，一气呵成（对照音乐混剪的做法）</div>
+</header>
+
+<main class="container">
+  <!-- 步骤1 -->
+  <section class="card">
+    <h2>1. 添加视频 <span class="hint">mp4/webm/mov/mkv/avi，可多选，可随时追加</span></h2>
+    <div id="dropzone" class="dropzone">
+      <p>把视频文件拖到这里，或 <label class="btn">选择文件<input id="fileInput" type="file" accept="video/*,.mkv,.mov,.avi,.m4v" multiple hidden /></label></p>
+      <p class="small">本地处理不上传，可不断追加。浏览器播不了的格式（mkv/avi等）会自动用 ffmpeg 转成 mp4 预览（首次需联网下载约25MB解码器）。例：第一段5-10秒+第二段19-35秒=拼成21秒。</p>
+      <div class="row">
+        <button id="demoBtn" class="btn ghost">＋ 添加3段示例视频（不用找文件也能玩）</button>
+        <button id="clearBtn" class="btn ghost danger">清空全部</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 步骤2 -->
+  <section class="card">
+    <h2>2. 每段选开始～结束 <span class="hint">胶片条上拖拉选段，按住 ⠿ 自由拖动排序，手机用 ↑↓</span></h2>
+    <div id="emptyTip" class="empty">还没有视频，先添加 👆</div>
+    <div id="clipList" class="clip-list"></div>
+  </section>
+
+  <!-- 步骤3 -->
+  <section class="card sticky">
+    <h2>3. 拼接预览 & 导出</h2>
+    <video id="preview" class="preview" controls playsinline preload="auto"></video>
+    <div id="mixInfo" class="mix-info">共 0 段，总长 0.0 秒</div>
+    <div id="mixBar" class="mix-bar"></div>
+    <div class="progress-wrap">
+      <div id="playProgress" class="progress"></div>
+    </div>
+    <div id="nowPlaying" class="now-playing">未播放</div>
+    <div class="row wrap">
+      <button id="playAllBtn" class="btn primary">▶ 预览全部拼接</button>
+      <button id="stopBtn" class="btn">⏹ 停止</button>
+      <button id="exportBtn" class="btn success">⬇ 导出 MP4</button>
+      <select id="mp4Size" title="导出清晰度">
+        <option value="original" selected>原画（跟随第一段）</option>
+        <option value="1280x720">720p（快，文件小）</option>
+        <option value="1920x1080">1080p（清晰，慢）</option>
+      </select>
+    </div>
+    <p class="small">原理：不破坏原文件，只记录 <code>{视频, start, end}</code>。预览用单个播放器按顺序无缝连播，导出用 ffmpeg 真合成（H.264+AAC）。每段首尾自动对齐关键帧重编码，音量按每段滑杆生效。导出首次需联网下载组件，之后离线也可用。</p>
+  </section>
+</main>
+
+<footer>本地运行：python3 -m http.server 后用浏览器打开 · 不要双击 file://（ffmpeg Worker 会被拦截）</footer>
+
+<script type="module">
+/* ffmpeg 0.12 单线程版（无需 SharedArrayBuffer），与 music-editor 同做法。
+ * classes.js 里 Worker 路径是写死的 new URL("./worker.js", import.meta.url)，
+ * 所以必须把 ffmpeg 的 esm 文件放本机同源（./vendor/ffmpeg/），否则跨域 new Worker 必失败。
+ * 请用 http 方式打开（python3 -m http.server），不要双击 file://。 */
+import { FFmpeg } from './vendor/ffmpeg/index.js?v=4';
+import { fetchFile, toBlobURL } from 'https://esm.sh/@ffmpeg/util@0.12.2';
+
+let ff = null;
+let loading = null;
+
+async function ensureFF() {
+  if (ff) return ff;
+  if (!loading) {
+    loading = (async () => {
+      const f = new FFmpeg();
+      const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+      const coreURL = await toBlobURL(`${coreBase}/ffmpeg-core.js`, 'text/javascript');
+      const wasmURL = await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, 'application/wasm');
+      await f.load({ coreURL, wasmURL });
+      ff = f;
+      return f;
+    })();
+  }
+  return loading;
+}
+
+window.__ffmpegEnsure = () => ensureFF();
+window.__ffmpegPreload = () => ensureFF().catch(e => console.warn('ffmpeg预加载失败', e));
+window.__ffmpegTranscodePreview = async (file) => {
+  const ffmpeg = await ensureFF();
+  const ext = ((file.name.split('.').pop() || 'mkv').toLowerCase()).replace(/[^a-z0-9]/g, '') || 'mkv';
+  const inName = `input.${ext}`;
+  const outName = 'preview.mp4';
+  try { await ffmpeg.deleteFile(inName); } catch (_) {}
+  try { await ffmpeg.deleteFile(outName); } catch (_) {}
+  await ffmpeg.writeFile(inName, await fetchFile(file));
+  const code = await ffmpeg.exec(['-i', inName, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outName]);
+  if (code !== 0) throw new Error('ffmpeg 转码失败');
+  const data = await ffmpeg.readFile(outName);
+  try { await ffmpeg.deleteFile(inName); } catch (_) {}
+  try { await ffmpeg.deleteFile(outName); } catch (_) {}
+  return new Uint8Array(data).slice(0);
+};
+</script>
+<script src="app.js"></script>
+</body>
+</html>
